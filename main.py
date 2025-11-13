@@ -2,6 +2,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+import feedparser
+import requests
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,7 +11,7 @@ from pydantic import BaseModel
 from database import db, create_document, get_documents
 from schemas import Article as ArticleSchema, Launch as LaunchSchema
 
-app = FastAPI(title="Grid7 API", version="1.0.0")
+app = FastAPI(title="Grid7 API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,66 +35,77 @@ class LaunchesResponse(BaseModel):
 
 CATEGORY_SET = {"AI", "OS", "Gadgets", "Other"}
 
+# --- Live Tech RSS Sources (no API keys needed) ---
+TECH_FEEDS = [
+    ("The Verge", "https://www.theverge.com/rss/index.xml"),
+    ("TechCrunch", "https://techcrunch.com/feed/"),
+    ("Ars Technica", "http://feeds.arstechnica.com/arstechnica/index"),
+    ("Engadget", "https://www.engadget.com/rss.xml"),
+]
+
+KEYWORD_TO_CATEGORY = {
+    "ai": "AI",
+    "artificial intelligence": "AI",
+    "machine learning": "AI",
+    "linux": "OS",
+    "windows": "OS",
+    "android": "OS",
+    "ios": "OS",
+    "macos": "OS",
+    "iphone": "Gadgets",
+    "ipad": "Gadgets",
+    "watch": "Gadgets",
+    "laptop": "Gadgets",
+    "phone": "Gadgets",
+    "camera": "Gadgets",
+}
+
+
+def _infer_category(text: str) -> str:
+    t = (text or "").lower()
+    for kw, cat in KEYWORD_TO_CATEGORY.items():
+        if kw in t:
+            return cat
+    return "Other"
+
+
+def fetch_live_articles(max_per_feed: int = 15) -> List[ArticleSchema]:
+    items: List[ArticleSchema] = []
+    for source, url in TECH_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:max_per_feed]:
+                title = getattr(entry, "title", "").strip()
+                summary = getattr(entry, "summary", getattr(entry, "description", ""))
+                link = getattr(entry, "link", None)
+                # Published date parsing
+                published = None
+                if getattr(entry, "published_parsed", None):
+                    published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                elif getattr(entry, "updated_parsed", None):
+                    published = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+                category = _infer_category(f"{title} {summary}")
+                art = ArticleSchema(
+                    source=source,
+                    category=category,
+                    headline=title[:240] if title else "Untitled",
+                    summary=(summary or "").replace("<p>", " ").replace("</p>", " ").strip()[:600],
+                    content=None,
+                    links=[link] if link else None,
+                    published_at=published,
+                )
+                items.append(art)
+        except Exception:
+            continue
+    # Sort by time desc, keep latest 60
+    items.sort(key=lambda a: a.published_at or datetime.now(timezone.utc), reverse=True)
+    return items[:60]
+
 
 def ensure_seed_data():
     """Seed a minimal set of demo content if collections are empty."""
     try:
-        # Seed Articles
-        if db and db["article"].count_documents({}) == 0:
-            seed_articles: List[ArticleSchema] = [
-                ArticleSchema(
-                    source="The Verge",
-                    category="AI",
-                    headline="OpenAI unveils next-gen reasoning model",
-                    summary="A new model focuses on tool-use and faithful reasoning with improved transparency.",
-                    content=(
-                        "OpenAI announced a next-generation model with better reasoning, tool-use, and safety. "
-                        "It aims to provide more grounded answers and integrates with partner ecosystems."
-                    ),
-                    links=["https://openai.com"],
-                    published_at=datetime.now(timezone.utc) - timedelta(hours=3),
-                ),
-                ArticleSchema(
-                    source="Ars Technica",
-                    category="OS",
-                    headline="Linux 6.x brings performance wins across the board",
-                    summary="The latest kernel release includes scheduler improvements and I/O optimizations.",
-                    content=(
-                        "Linux 6.x introduces notable performance improvements on desktop and server workloads, "
-                        "with enhanced power management and filesystem updates."
-                    ),
-                    links=["https://arstechnica.com"],
-                    published_at=datetime.now(timezone.utc) - timedelta(hours=6),
-                ),
-                ArticleSchema(
-                    source="Engadget",
-                    category="Gadgets",
-                    headline="A foldable that actually feels durable",
-                    summary="Early hands-on suggests improved hinge design and fewer display creases.",
-                    content=(
-                        "The latest foldable phone iteration focuses on durability with a redesigned hinge and "
-                        "enhanced protective layers, aiming to reduce creases and improve lifespan."
-                    ),
-                    links=["https://engadget.com"],
-                    published_at=datetime.now(timezone.utc) - timedelta(hours=12),
-                ),
-                ArticleSchema(
-                    source="TechCrunch",
-                    category="Other",
-                    headline="Startup raises funding to build modular satellites",
-                    summary="Aerospace startup lands Series B to scale modular satellite platforms.",
-                    content=(
-                        "The company plans to accelerate development of modular satellite buses, enabling faster "
-                        "deployment and lower costs for a range of orbital missions."
-                    ),
-                    links=["https://techcrunch.com"],
-                    published_at=datetime.now(timezone.utc) - timedelta(days=1, hours=2),
-                ),
-            ]
-            for art in seed_articles:
-                create_document("article", art)
-
-        # Seed Launches
+        # Seed Launches only; articles will be live-fetched
         if db and db["launch"].count_documents({}) == 0:
             base = datetime.now(timezone.utc)
             seed_launches: List[LaunchSchema] = [
@@ -128,13 +141,19 @@ def ensure_seed_data():
             for ln in seed_launches:
                 create_document("launch", ln)
     except Exception:
-        # If database isn't configured, skip silently (endpoints will still work with empty results)
         pass
 
 
 @app.on_event("startup")
 async def startup_event():
     ensure_seed_data()
+    # Warm the cache with live articles if DB is configured and empty
+    try:
+        if db and db["article"].count_documents({}) == 0:
+            for art in fetch_live_articles():
+                create_document("article", art)
+    except Exception:
+        pass
 
 
 @app.get("/")
@@ -148,25 +167,29 @@ def get_articles(
     limit: int = Query(default=40, ge=1, le=200),
 ):
     ensure_seed_data()
-    filter_dict = {}
-    if category and category in CATEGORY_SET:
-        filter_dict["category"] = category
 
-    items = []
+    # Try DB first
+    items: List[ArticleSchema] = []
     total = 0
     try:
+        filter_dict = {}
+        if category and category in CATEGORY_SET:
+            filter_dict["category"] = category
         docs = get_documents("article", filter_dict=filter_dict, limit=limit)
         total = db["article"].count_documents(filter_dict) if db else len(docs)
-        # Convert Mongo docs to ArticleSchema
         for d in docs:
-            # Clean _id and timestamps
             d.pop("_id", None)
             items.append(ArticleSchema(**d))
     except Exception:
-        # If DB isn't available, return empty
-        items = []
-        total = 0
+        # If DB isn't available, fall back to live fetch
+        items = fetch_live_articles(max_per_feed=15)
+        if category and category in CATEGORY_SET:
+            items = [a for a in items if a.category == category]
+        total = len(items)
+        items = items[:limit]
 
+    # Sort by newest
+    items.sort(key=lambda a: a.published_at or datetime.now(timezone.utc), reverse=True)
     return ArticlesResponse(items=items, total=total, refreshed_at=datetime.now(timezone.utc))
 
 
@@ -191,11 +214,20 @@ def get_launches(limit: int = Query(default=30, ge=1, le=200)):
 @app.post("/api/refresh")
 def trigger_refresh():
     """
-    Placeholder refresh endpoint. In a production scenario, this would re-fetch
-    content from external sources. Here it simply returns a timestamp that the
-    frontend can use to show a spinner.
+    Refresh endpoint: fetches fresh articles from RSS feeds and stores them if DB is available.
+    Always returns the current timestamp; frontend can show spinner while it reloads.
     """
-    return {"status": "ok", "refreshed_at": datetime.now(timezone.utc)}
+    refreshed_at = datetime.now(timezone.utc)
+    try:
+        live_items = fetch_live_articles()
+        if db:
+            # simple strategy: clear and re-insert recent
+            db["article"].delete_many({})
+            for art in live_items:
+                create_document("article", art)
+    except Exception:
+        pass
+    return {"status": "ok", "refreshed_at": refreshed_at}
 
 
 @app.get("/test")
