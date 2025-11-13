@@ -1,48 +1,33 @@
 """
-Database Schemas
+Database Schemas for Grid7
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Each Pydantic model corresponds to a MongoDB collection whose name is the lowercase
+of the class name. For example: Article -> "article", Launch -> "launch".
 """
+from typing import List, Optional
+from pydantic import BaseModel, Field, HttpUrl
+from datetime import datetime
 
-from pydantic import BaseModel, Field
-from typing import Optional
-
-# Example schemas (replace with your own):
-
-class User(BaseModel):
+class Article(BaseModel):
     """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
+    Tech news article schema
+    Collection: "article"
     """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    source: str = Field(..., description="Publisher name e.g., The Verge")
+    category: str = Field(..., description="AI | OS | Gadgets | Other")
+    headline: str = Field(..., description="Article headline")
+    summary: str = Field(..., description="Concise 2-3 sentence brief")
+    content: Optional[str] = Field(None, description="Full article text or extended brief")
+    links: Optional[List[HttpUrl]] = Field(default=None, description="Source/grounding links")
+    published_at: Optional[datetime] = Field(default=None, description="Original publish time")
 
-class Product(BaseModel):
+class Launch(BaseModel):
     """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
+    Upcoming tech launch / milestone
+    Collection: "launch"
     """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
-
-# Add your own schemas here:
-# --------------------------------------------------
-
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+    title: str = Field(..., description="Launch title")
+    description: str = Field(..., description="Short description of the launch")
+    date: datetime = Field(..., description="Planned date/time of launch or milestone")
+    tag: str = Field(..., description="Category tag e.g., AI | OS | Gadgets | Other")
+    link: Optional[HttpUrl] = Field(default=None, description="Reference link")
